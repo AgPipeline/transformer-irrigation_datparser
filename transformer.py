@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import os
+from urllib.parse import urlparse
 from typing import Optional, Union
 from parser import parse_file
 import requests
@@ -46,7 +47,7 @@ class __internal__:
             Returns the first found file that matches the searching criteria
         """
         for one_file in file_list:
-            if one_file.startswith(IRRIGATION_FILENAME_START) and one_file.endswith(IRRIGATION_FILENAME_END):
+            if os.path.basename(one_file).startswith(IRRIGATION_FILENAME_START) and one_file.endswith(IRRIGATION_FILENAME_END):
                 return one_file
         return None
 
@@ -71,23 +72,35 @@ class __internal__:
         Return:
             Returns the formatted URL (guaranteed to not have a trailing slash)
         """
-        def url_join(url_parts: tuple) -> str:
+        def url_join(base_url: str, url_parts: tuple) -> str:
             """Internal function to create URLs in a consistent fashion
             Arguments:
+                base_url: the starting part of the URL
                 url_parts: the parts of the URL to join
             Return:
                 The formatted URL
             """
-            return '/'.join(url_parts).replace('//', '/').rstrip('/')
+            built_url = ''
+            base_parse = urlparse(base_url)
+            if base_parse.scheme:
+                built_url = base_parse.scheme + '://'
+            if base_parse.netloc:
+                built_url += base_parse.netloc + '/'
+            if base_parse.path and not base_parse.path == '/':
+                built_url += base_parse.path.lstrip('/') + '/'
+
+            joined_parts = '/'.join(url_parts).replace('//', '/').strip('/')
+
+            return built_url + joined_parts
 
         if not url_particles:
-            return url_join(tuple(base_url))
+            return url_join(base_url, tuple(GEOSTREAMS_API_URL_PARTICLE))
 
         if isinstance(url_particles, str):
-            return url_join((base_url, url_particles))
+            return url_join(base_url, (GEOSTREAMS_API_URL_PARTICLE, url_particles))
 
         formatted_particles = tuple(str(part) for part in url_particles)
-        return url_join((base_url, GEOSTREAMS_API_URL_PARTICLE) + formatted_particles)
+        return url_join(base_url, tuple(GEOSTREAMS_API_URL_PARTICLE) + formatted_particles)
 
     @staticmethod
     def _common_geostreams_name_get(clowder_url: str, clowder_key: str, url_endpoint: str, name_query_key: str, name: str) -> \
@@ -134,13 +147,13 @@ class __internal__:
             url = url + '?key=' + clowder_key
 
         result = requests.post(url,
-                               header={'Content-type': 'application/json'},
+                               headers={'Content-type': 'application/json'},
                                data=request_body)
         result.raise_for_status()
 
         result_id = None
         result_json = result.json()
-        if 'id' in result_json:
+        if isinstance(result_json, dict) and 'id' in result_json:
             result_id = result_json['id']
             logging.debug("Created GeoStreams %s: id = '%s'", url_endpoint, result_id)
         else:
@@ -306,7 +319,6 @@ def perform_process(transformer: transformer_class.Transformer, check_md: dict) 
     # Get sensor or create if not found
     sensor_data = __internal__.get_sensor_by_name(display_name, transformer.args.clowder_url, transformer.args.clowder_key)
     if not sensor_data:
-        # sensor_name: str, clowder_url: str, clowder_key: str, geom: dict, sensor_type: dict, region: str
         sensor_id = __internal__.create_sensor(display_name, transformer.args.clowder_url, transformer.args.clowder_key, geom,
                                                {
                                                    'id': 'MAC Met Station',
@@ -326,6 +338,7 @@ def perform_process(transformer: transformer_class.Transformer, check_md: dict) 
         stream_id = stream_data['id']
 
     # Load the records and loop through them
+    logging.info("Processing file: '%s'", file_to_load)
     records = parse_file(file_to_load, main_coords)
     total_dp = 0
     data_point_list = []
@@ -338,10 +351,13 @@ def perform_process(transformer: transformer_class.Transformer, check_md: dict) 
             "properties": record['properties']
         })
         if len(data_point_list) > transformer.args.batchsize:
+            logging.debug("Adding %s data points", str(len(data_point_list)))
             __internal__.create_data_points(transformer.args.clowder_url, transformer.args.clowder_key, stream_id, data_point_list)
             total_dp += len(data_point_list)
             data_point_list = []
+    logging.debug("Remaining number of points: %s vs max: %s", str(len(data_point_list)), str(transformer.args.batchsize))
     if len(data_point_list) > 0:
+        logging.debug("Adding %s remaining data points", str(len(data_point_list)))
         __internal__.create_data_points(transformer.args.clowder_url, transformer.args.clowder_key, stream_id, data_point_list)
         total_dp += len(data_point_list)
 
